@@ -84,9 +84,17 @@ run_harness() {
 #   <feature>  = optional Cargo feature to enable (e.g. "sdk20", "sdk22")
 #   <test_name>= optional specific test function to run
 
-mapfile -t test_files < <(git ls-files "*/tests/*.rs")
+# Collected with a `read` loop rather than `mapfile`, which is a bash 4
+# builtin: macOS still ships bash 3.2 as `/bin/bash`.
+test_files=()
+while IFS= read -r test_file; do
+    [ -z "$test_file" ] && continue
+    test_files+=("$test_file")
+done < <(git ls-files "*/tests/*.rs")
 
-for file in "${test_files[@]}"; do
+# `${a[@]+"${a[@]}"}` rather than `"${a[@]}"`: expanding an empty array
+# trips `set -u` on bash 3.2.
+for file in ${test_files[@]+"${test_files[@]}"}; do
     # Extract crate name from the path (first component before '/').
     crate="$(echo "$file" | cut -d'/' -f1)"
     # Determine the test target name (file stem without .rs).
