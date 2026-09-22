@@ -13,6 +13,11 @@
 # Usage: scripts/check-module-reachability.sh
 #   exit 0 — every `.rs` file under every `src/` is reachable
 #   exit 1 — at least one orphaned file (listed on stdout)
+#
+# Targets bash 3.2, the version macOS still ships as `/bin/bash`. No
+# `mapfile`, no associative arrays, and no expansion of a possibly-empty
+# array under `set -u`. `cargo-budget-report/tests/script_portability.rs`
+# holds the scripts to that.
 
 set -euo pipefail
 
@@ -75,7 +80,14 @@ declared_modules() {
 }
 
 # All crate roots across the workspace: `src/main.rs` or `src/lib.rs`.
-mapfile -t crate_roots < <(
+# Collected with a `read` loop rather than `mapfile`, which is a bash 4
+# builtin: macOS still ships bash 3.2 as `/bin/bash`, and CONTRIBUTING.md
+# expects this script to run there too.
+crate_roots=()
+while IFS= read -r crate_root; do
+    [ -z "$crate_root" ] && continue
+    crate_roots+=("$crate_root")
+done < <(
     find . -type f \( -name 'main.rs' -o -name 'lib.rs' \) -path '*/src/*' \
         -not -path './target/*' -not -path './node_modules/*' | sort
 )
@@ -89,22 +101,40 @@ is_crate_root_file() {
     esac
 }
 
+# The set of files already visited. Associative arrays are also bash 4, so
+# the set is a newline-delimited string and membership is an exact-line
+# match. Paths come from `find .`, so each one starts with `./` and cannot
+# contain a newline that would split an entry.
+reachable=$'\n'
+
+is_reachable() {
+    case "$reachable" in
+        *$'\n'"$1"$'\n'*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+mark_reachable() {
+    reachable="$reachable$1"$'\n'
+}
+
 # Walk the module tree from each crate root, resolving `mod name;` to
 # `name.rs` or `name/mod.rs` relative to the declaring file's directory.
-declare -A reachable=()
-queue=()
-for crate_root in "${crate_roots[@]}"; do
-    queue+=("$crate_root")
-done
+# `${a[@]+"${a[@]}"}` rather than `"${a[@]}"`: expanding an empty array
+# trips `set -u` on bash 3.2.
+queue=(${crate_roots[@]+"${crate_roots[@]}"})
 
-while [ ${#queue[@]} -gt 0 ]; do
-    file="${queue[0]}"
-    queue=("${queue[@]:1}")
+# Consumed with a moving index, since slicing the array down to empty trips
+# the same `set -u` behaviour.
+queue_index=0
+while [ "$queue_index" -lt ${#queue[@]} ]; do
+    file="${queue[$queue_index]}"
+    queue_index=$((queue_index + 1))
 
-    if [ -n "${reachable[$file]:-}" ]; then
+    if is_reachable "$file"; then
         continue
     fi
-    reachable["$file"]=1
+    mark_reachable "$file"
 
     dir="$(dirname "$file")"
     while IFS= read -r name; do
@@ -125,7 +155,7 @@ while IFS= read -r file; do
     if is_crate_root_file "$file"; then
         continue
     fi
-    if [ -z "${reachable[$file]:-}" ]; then
+    if ! is_reachable "$file"; then
         echo "orphaned: $file is not reachable from any crate root (missing \`mod\` declaration)"
         orphans=1
     fi
