@@ -16,24 +16,22 @@
 //! cargo build --target wasm32v1-none --release -p amm-pool-contract
 //! cargo test -p amm-pool-contract --test measure_auth_gap -- --ignored --nocapture
 //! ```
-//!
-//! # Output
-//!
-//! The test prints `AUTH_CPU=<value>` and `AUTH_MEM=<value>` to stdout.
-//! These values are manually transcribed into `MEASUREMENTS.md` under the
-//! "Authorization Cost" section.
+
+mod common;
 
 #[cfg(test)]
 mod measure_auth_gap {
+    use super::common;
     use amm_pool_contract::ConstantProductPoolClient;
     use soroban_sdk::{testutils::Address as _, Address, Env};
 
-    fn measure_require_auth_only(env: &Env) {
-        let wasm_path = "../target/wasm32v1-none/release/amm_pool_contract.wasm";
-        let wasm = std::fs::read(wasm_path).expect("WASM file not found, did you run cargo build?");
+    fn setup_client<'a>(env: &Env) -> ConstantProductPoolClient<'a> {
+        let wasm = common::load_contract_wasm("wasm32v1-none");
         let contract_id = env.register(wasm.as_slice(), ());
-        let client = ConstantProductPoolClient::new(env, &contract_id);
+        ConstantProductPoolClient::new(env, &contract_id)
+    }
 
+    fn measure_require_auth_only(env: &Env, client: &ConstantProductPoolClient) {
         let user = Address::generate(env);
 
         env.mock_all_auths();
@@ -54,6 +52,7 @@ mod measure_auth_gap {
     #[ignore]
     fn measure_auth_gap() {
         let env = Env::default();
-        measure_require_auth_only(&env);
+        let client = setup_client(&env);
+        measure_require_auth_only(&env, &client);
     }
 }

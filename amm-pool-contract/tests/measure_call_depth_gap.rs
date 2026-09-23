@@ -25,32 +25,30 @@
 
 #![cfg(not(feature = "sdk20"))]
 
+mod common;
+
 use amm_pool_contract::RelayContractClient;
 use soroban_sdk::{Address, Env, Vec as SdkVec};
 
-const WASM_PATH: &str = "../target/wasm32v1-none/release/amm_pool_contract.wasm";
 const DEPTHS: [u32; 4] = [1, 2, 3, 4];
 
 #[test]
 fn measure_call_depth_gap() {
-    let mut points: std::vec::Vec<(u32, u64)> = std::vec::Vec::new();
+    let mut points: std::vec::Vec<(u32, u64)> = std::vec::Vec::with_capacity(DEPTHS.len());
+    let wasm = common::load_contract_wasm("wasm32v1-none");
 
     for depth in DEPTHS {
         let env = Env::default();
-        let wasm = std::fs::read(WASM_PATH)
-            .expect("WASM not found — run cargo build --target wasm32v1-none --release -p amm-pool-contract");
 
         // Register `depth` instances of the relay contract.
         let ids: std::vec::Vec<Address> = (0..depth)
             .map(|_| env.register(wasm.as_slice(), ()))
             .collect();
+
         let head = RelayContractClient::new(&env, &ids[0]);
 
         // The chain the head relays through: instances 2..=depth.
-        let mut chain: SdkVec<Address> = SdkVec::new(&env);
-        for id in ids.iter().skip(1) {
-            chain.push_back(id.clone());
-        }
+        let chain: SdkVec<Address> = SdkVec::from_slice(&env, &ids[1..]);
 
         env.cost_estimate().budget().reset_unlimited();
         let reached = head.relay(&chain, &0u32);

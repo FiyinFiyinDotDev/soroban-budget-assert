@@ -35,8 +35,7 @@ const THRESHOLD: u32 = 100;
 
 /// Register the WASM contract, initialize it, and return the client.
 fn setup(env: &Env) -> ConstantProductPoolClient<'_> {
-    let wasm_path = "../target/wasm32v1-none/release/amm_pool_contract.wasm";
-    let wasm = std::fs::read(wasm_path).expect("WASM file not found, did you run cargo build?");
+    let wasm = common::load_contract_wasm("wasm32v1-none");
     let contract_id = env.register(wasm.as_slice(), ());
     let client = ConstantProductPoolClient::new(env, &contract_id);
     env.mock_all_auths();
@@ -123,4 +122,24 @@ fn calibrate_persistent_extend_ttl_50000() {
     println!("=== CALIBRATE_PERSISTENT_EXTEND_TTL extend_to=50000 ===");
     println!("CALIBRATE_CPU={}", cpu);
     println!("CALIBRATE_MEM={}", mem);
+}
+
+// ── Unit Tests ──────────────────────────────────────────
+
+#[test]
+#[should_panic]
+fn test_extend_instance_ttl_invalid_threshold() {
+    let env = Env::default();
+    let client = setup(&env);
+    // threshold > extend_to is invalid
+    client.extend_instance_ttl(&1000, &500);
+}
+
+#[test]
+#[should_panic]
+fn test_extend_persistent_ttl_invalid_threshold() {
+    let env = Env::default();
+    let client = setup(&env);
+    // threshold > extend_to is invalid
+    client.extend_persistent_ttl(&1000, &500);
 }
