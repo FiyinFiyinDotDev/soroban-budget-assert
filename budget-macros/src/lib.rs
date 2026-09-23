@@ -722,17 +722,32 @@ fn assert_messages(
 ///   literally; exclude one with its own no-op attribute if that is not wanted.
 /// - Anything else: the original `fn`-parse error, so `#[budget_*] struct …`
 ///   still fails with "expected `fn`".
+///
+/// This is the [`proc_macro::TokenStream`] bridge; the actual work lives in
+/// [`expand_targets_inner`], which stays free of the proc-macro bridge so the
+/// impl-block decisions can be unit-tested (see `tests/mod` in `src/lib.rs`).
 fn expand_targets(item: TokenStream, expand: impl Fn(ItemFn, &str) -> TokenStream) -> TokenStream {
-    let tokens: proc_macro2::TokenStream = item.clone().into();
+    let tokens: proc_macro2::TokenStream = item.into();
+    TokenStream::from(expand_targets_inner(tokens, |input_fn, label| {
+        expand(input_fn, label).into()
+    }))
+}
 
-    let fn_err = match syn::parse::<ItemFn>(item) {
+/// The pure core of [`expand_targets`], operating entirely on
+/// `proc_macro2::TokenStream` so it can be exercised without a live
+/// proc-macro bridge (see the `tests` module, `tests/ui/on_empty_impl.rs`).
+fn expand_targets_inner(
+    item: proc_macro2::TokenStream,
+    expand: impl Fn(ItemFn, &str) -> proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let fn_err = match syn::parse2::<ItemFn>(item.clone()) {
         Ok(input_fn) => return expand(input_fn, ""),
         Err(e) => e,
     };
 
-    let mut item_impl = match syn::parse2::<syn::ItemImpl>(tokens) {
+    let mut item_impl = match syn::parse2::<syn::ItemImpl>(item) {
         Ok(block) => block,
-        Err(_) => return TokenStream::from(fn_err.to_compile_error()),
+        Err(_) => return fn_err.to_compile_error(),
     };
 
     let mut instrumented = 0usize;
@@ -752,28 +767,26 @@ fn expand_targets(item: TokenStream, expand: impl Fn(ItemFn, &str) -> TokenStrea
             block: Box::new(method.block.clone()),
         };
         let label = method.sig.ident.to_string();
-        let expanded: proc_macro2::TokenStream = expand(as_fn, &label).into();
+        let expanded: proc_macro2::TokenStream = expand(as_fn, &label);
         match syn::parse2::<syn::ImplItemFn>(expanded) {
             Ok(new_method) => {
                 *method = new_method;
                 instrumented += 1;
             }
-            Err(e) => return TokenStream::from(e.to_compile_error()),
+            Err(e) => return e.to_compile_error(),
         }
     }
 
     if instrumented == 0 {
-        return TokenStream::from(
-            syn::Error::new_spanned(
-                &item_impl,
-                "#[budget_*] on this impl block instrumented no methods: it has no \
-                 functions, or every function already carries its own budget attribute",
-            )
-            .to_compile_error(),
-        );
+        return syn::Error::new_spanned(
+            &item_impl,
+            "#[budget_*] on this impl block instrumented no methods: it has no \
+             functions, or every function already carries its own budget attribute",
+        )
+        .to_compile_error();
     }
 
-    TokenStream::from(quote! { #item_impl })
+    quote! { #item_impl }
 }
 
 /// Builds one metric's measurement + assertion.
@@ -1939,7 +1952,11 @@ pub fn budget_scaling(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_env_file_at_expansion, BudgetLimit, BudgetSpec, StandaloneSpec};
+    use super::{
+        expand_targets_inner, resolve_env_file_at_expansion, BudgetLimit, BudgetSpec,
+        StandaloneSpec,
+    };
+    use quote::quote;
     use syn::parse_str;
 
     #[test]
@@ -2048,5 +2065,220 @@ mod tests {
         // cleanly on its own.
         let spec = parse_str::<StandaloneSpec>("1000").expect("a bare limit parses");
         assert!(spec.baseline.is_none());
+    }
+
+    // ── `tests/ui/on_empty_impl.rs` (#631) ─────────────────────────────────
+    //
+    // The compile-fail fixture pins the diagnostic emitted when a budget
+    // attribute annotates an `impl` block with nothing to instrument. These
+    // tests drive the shared impl-block walker behind that diagnostic
+    // directly, so both failure cases — no functions at all, and every
+    // function already carrying its own attribute — are covered here as well
+    // as in the `.stderr` snapshot.
+
+    fn assert_tokens_contain(tokens: &proc_macro2::TokenStream, needle: &str) {
+        let rendered = tokens.to_string();
+        assert!(
+            rendered.contains(needle),
+            "tokens {rendered:?} should contain {needle:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_impl_block_emits_the_no_methods_diagnostic() {
+        let output = expand_targets_inner(quote! { impl Contract {} }, |f, _| quote! { #f });
+        assert_tokens_contain(&output, "instrumented no methods");
+    }
+
+    #[test]
+    fn an_impl_whose_methods_all_carry_their_own_attribute_is_rejected() {
+        // `is_budget_attr` must skip methods with their own budget attribute,
+        // leaving zero to instrument — the second documented failure case.
+        let output = expand_targets_inner(
+            quote! {
+                impl Contract {
+                    #[budget_cpu_lt(1_000)]
+                    fn attributed(&mut self) {}
+                }
+            },
+            |f, _| quote! { #f },
+        );
+        assert_tokens_contain(&output, "instrumented no methods");
+    }
+
+    #[test]
+    fn a_mixed_impl_instruments_only_methods_without_their_own_attribute() {
+        let instrumented = std::cell::RefCell::new(Vec::new());
+        let output = expand_targets_inner(
+            quote! {
+                impl Contract {
+                    fn bare(&mut self) {}
+                    #[budget_mem_lt(1_000)]
+                    fn attributed(&mut self) {}
+                }
+            },
+            |f, label| {
+                instrumented.borrow_mut().push(label.to_string());
+                let ident = &f.sig.ident;
+                quote! { fn #ident() {} }
+            },
+        );
+        assert_eq!(
+            instrumented.borrow().as_slice(),
+            ["bare"],
+            "only the un-attributed method is instrumented"
+        );
+        assert!(
+            !output.to_string().contains("compile_error"),
+            "a mixed impl must expand cleanly"
+        );
+    }
+
+    #[test]
+    fn a_bare_fn_is_expanded_under_the_empty_label() {
+        // A bare `fn` target keeps the historical empty label, so failure
+        // messages do not gain a `[fn …]` suffix for paths that never had one.
+        let labels = std::cell::RefCell::new(Vec::new());
+        expand_targets_inner(quote! { fn it() {} }, |f, label| {
+            labels.borrow_mut().push(label.to_string());
+            quote! { #f }
+        });
+        assert_eq!(labels.borrow().as_slice(), [""]);
+    }
+
+    #[test]
+    fn a_struct_receives_the_fn_parse_error_not_silent_success() {
+        let output = expand_targets_inner(quote! { struct Contract; }, |f, _| quote! { #f });
+        assert_tokens_contain(&output, "expected `fn`");
+    }
+
+    // ── `tests/ui/wrong_baseline_key.rs` (#634) ────────────────────────────
+    //
+    // That fixture pins the diagnostic for a comma followed by a non-`baseline`
+    // key. These tests pin the standalone-spec parser that produces it, plus
+    // the accepted singular form and the trailing-token guard.
+
+    #[test]
+    fn a_standalone_spec_rejects_a_non_baseline_trailing_key() {
+        let err = parse_str::<StandaloneSpec>("1000, baselines = 100")
+            .err()
+            .expect("the plural `baselines` must be rejected")
+            .to_string();
+        assert!(
+            err.contains("expected `baseline`, got `baselines`"),
+            "diagnostic {err:?} should name the offending key"
+        );
+    }
+
+    #[test]
+    fn a_standalone_spec_accepts_a_singular_baseline() {
+        let spec = parse_str::<StandaloneSpec>("1000, baseline = 2")
+            .expect("the singular `baseline` key parses");
+        assert!(spec.baseline.is_some());
+    }
+
+    #[test]
+    fn a_standalone_spec_without_a_trailing_key_keeps_no_baseline() {
+        let spec = parse_str::<StandaloneSpec>("1000").expect("a bare limit parses");
+        assert!(spec.baseline.is_none());
+    }
+
+    #[test]
+    fn an_env_sourced_limit_accepts_a_baseline_too() {
+        // A sourced limit must also stop before `, baseline`, leaving it for
+        // the enclosing `StandaloneSpec` to consume.
+        let spec = parse_str::<StandaloneSpec>("env = \"CPU_LIMIT\", baseline = 2")
+            .expect("a sourced limit with a baseline parses");
+        assert!(spec.baseline.is_some());
+        assert!(matches!(spec.limit, BudgetLimit::EnvVar(_)));
+    }
+
+    #[test]
+    fn a_standalone_spec_rejects_tokens_after_the_baseline() {
+        let err = parse_str::<StandaloneSpec>("1000, baseline = 2, bogus")
+            .err()
+            .expect("tokens trailing a baseline must be rejected")
+            .to_string();
+        assert!(
+            err.contains("unexpected token(s) after `baseline = …`"),
+            "diagnostic {err:?} should flag the trailing tokens"
+        );
+    }
+
+    // ── `tests/ui/pct_out_of_range_high.rs` (#635) ────────────────────────
+    //
+    // That fixture pins the rejection of a percentage above 100. These tests
+    // pin the 1–100 range gate and its boundaries directly, plus the
+    // `of = <source>` requirement and the guard against combining `pct` with
+    // an absolute source.
+
+    #[test]
+    fn a_pct_above_100_is_rejected_by_the_range_check() {
+        let err = parse_str::<BudgetLimit>(
+            "pct = 101, of = env_file = \"tier-a-limits.env\", env = \"NETWORK__CPU\"",
+        )
+        .err()
+        .expect("pct above 100 must be rejected")
+        .to_string();
+        assert!(
+            err.contains("percentage must be between 1 and 100, got 101"),
+            "diagnostic {err:?} should quote the offending percentage"
+        );
+    }
+
+    #[test]
+    fn a_pct_of_zero_is_rejected_by_the_range_check() {
+        let err = parse_str::<BudgetLimit>("pct = 0, of = env = \"NETWORK__CPU\"")
+            .err()
+            .expect("pct of 0 must be rejected")
+            .to_string();
+        assert!(
+            err.contains("percentage must be between 1 and 100, got 0"),
+            "diagnostic {err:?} should quote the offending percentage"
+        );
+    }
+
+    #[test]
+    fn the_pct_boundary_values_1_and_100_parse() {
+        for pct in [1u64, 100] {
+            let parsed =
+                parse_str::<BudgetLimit>(&format!("pct = {pct}, of = env = \"NETWORK__CPU\""))
+                    .expect("boundary percentages parse");
+            let BudgetLimit::Percentage {
+                pct: got,
+                of: of_limit,
+            } = parsed
+            else {
+                panic!("pct {pct} should parse as a Percentage");
+            };
+            assert_eq!(got, pct);
+            assert!(matches!(*of_limit, BudgetLimit::EnvVar(_)));
+        }
+    }
+
+    #[test]
+    fn a_pct_without_of_is_rejected() {
+        let err = parse_str::<BudgetLimit>("pct = 25")
+            .err()
+            .expect("`pct` without `of` must be rejected")
+            .to_string();
+        assert!(
+            err.contains("`pct` requires `of = <source>`"),
+            "diagnostic {err:?} should demand a source"
+        );
+    }
+
+    #[test]
+    fn a_pct_cannot_be_combined_with_a_trailing_absolute_source() {
+        for trailing in ["env = \"CPU_LIMIT\"", "config = \"cpu_limit\""] {
+            let err = parse_str::<BudgetLimit>(&format!("pct = 25, {trailing}"))
+                .err()
+                .expect("a trailing absolute source must be rejected")
+                .to_string();
+            assert!(
+                err.contains("`pct` cannot be combined"),
+                "diagnostic {err:?} should reject the trailing source"
+            );
+        }
     }
 }
