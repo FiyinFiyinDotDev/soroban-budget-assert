@@ -1,5 +1,5 @@
 use crate::fixture::FixtureFile;
-use crate::transport::Transport;
+use crate::transport::{deploy_key, invoke_key, simulate_key, Transport};
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -44,7 +44,7 @@ impl<T: Transport> Transport for RecordingTransport<T> {
         let result = self
             .inner
             .deploy_contract(wasm_path, source, network, package_name)?;
-        let key = format!("deploy:{}", package_name);
+        let key = deploy_key(package_name);
         self.entries.insert(key, Value::String(result.clone()));
         Ok(result)
     }
@@ -66,7 +66,7 @@ impl<T: Transport> Transport for RecordingTransport<T> {
             func_args,
             package,
         )?;
-        let key = format!("invoke:{}:{}", package, function);
+        let key = invoke_key(package, function);
         self.entries.insert(key, Value::String(result.clone()));
         Ok(result)
     }
@@ -80,7 +80,7 @@ impl<T: Transport> Transport for RecordingTransport<T> {
         let result = self
             .inner
             .simulate_transaction(b64_xdr, package, function)?;
-        let key = format!("simulate:{}:{}", package, function);
+        let key = simulate_key(package, function);
         self.entries.insert(key, result.clone());
         Ok(result)
     }
@@ -177,6 +177,38 @@ mod tests {
             .simulate_transaction("xdr", "pkg", "missing")
             .unwrap_err();
         assert!(err.to_string().contains("Fixture not found"));
+    }
+
+    #[test]
+    fn replay_missing_entry_names_the_full_key() {
+        let mut replay = ReplayTransport::new(FixtureFile::new());
+        let deploy = replay
+            .deploy_contract(Path::new("c.wasm"), "alice", "testnet", "pkg")
+            .unwrap_err();
+        assert_eq!(deploy.to_string(), "Fixture not found for deploy:pkg");
+        let invoke = replay
+            .build_invoke_xdr("C1", "alice", "testnet", "f", &[], "pkg")
+            .unwrap_err();
+        assert_eq!(invoke.to_string(), "Fixture not found for invoke:pkg:f");
+        let simulate = replay.simulate_transaction("xdr", "pkg", "f").unwrap_err();
+        assert_eq!(simulate.to_string(), "Fixture not found for simulate:pkg:f");
+    }
+
+    #[test]
+    fn recording_stores_entries_under_transport_keys() {
+        let mut recording = RecordingTransport::new(MockTransport);
+        recording
+            .deploy_contract(Path::new("c.wasm"), "alice", "testnet", "pkg")
+            .unwrap();
+        recording
+            .build_invoke_xdr("C1", "alice", "testnet", "f", &[], "pkg")
+            .unwrap();
+        recording.simulate_transaction("x", "pkg", "f").unwrap();
+        let entries = recording.into_fixture().entries;
+        assert_eq!(entries.len(), 3);
+        assert!(entries.contains_key(&crate::transport::deploy_key("pkg")));
+        assert!(entries.contains_key(&crate::transport::invoke_key("pkg", "f")));
+        assert!(entries.contains_key(&crate::transport::simulate_key("pkg", "f")));
     }
 
     #[test]
