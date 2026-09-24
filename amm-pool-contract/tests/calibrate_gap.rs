@@ -84,7 +84,10 @@ mod calibrate_gap {
         let wasm = load_wasm_bytes();
         let (cpu, mem) = measure_cpu_mem(&env, &wasm);
         assert!(cpu > 0, "CPU cost must be non-zero for do_expensive_work");
-        assert!(mem > 0, "memory cost must be non-zero for do_expensive_work");
+        assert!(
+            mem > 0,
+            "memory cost must be non-zero for do_expensive_work"
+        );
     }
 
     /// Verifies that two independent measurements of the same workload in the

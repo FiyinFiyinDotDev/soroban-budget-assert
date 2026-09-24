@@ -84,8 +84,14 @@ mod calibrate_gap_sdk20 {
         let env = Env::default();
         let wasm = load_wasm_bytes();
         let (cpu, mem) = measure_cpu_mem(&env, &wasm);
-        assert!(cpu > 0, "SDK 20.x CPU cost must be non-zero for do_expensive_work");
-        assert!(mem > 0, "SDK 20.x memory cost must be non-zero for do_expensive_work");
+        assert!(
+            cpu > 0,
+            "SDK 20.x CPU cost must be non-zero for do_expensive_work"
+        );
+        assert!(
+            mem > 0,
+            "SDK 20.x memory cost must be non-zero for do_expensive_work"
+        );
     }
 
     /// Verifies that two independent measurements of the same workload in the
@@ -104,8 +110,14 @@ mod calibrate_gap_sdk20 {
         let env2 = Env::default();
         let (cpu2, mem2) = measure_cpu_mem(&env2, &wasm);
 
-        assert!(cpu1 > 0 && cpu2 > 0, "both SDK 20.x CPU costs must be non-zero");
-        assert!(mem1 > 0 && mem2 > 0, "both SDK 20.x memory costs must be non-zero");
+        assert!(
+            cpu1 > 0 && cpu2 > 0,
+            "both SDK 20.x CPU costs must be non-zero"
+        );
+        assert!(
+            mem1 > 0 && mem2 > 0,
+            "both SDK 20.x memory costs must be non-zero"
+        );
 
         assert_eq!(
             cpu1, cpu2,

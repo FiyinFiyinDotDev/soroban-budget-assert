@@ -1109,9 +1109,7 @@ fn test_budget_macro_json_config_null_value_rejected() {
 /// Verifies that `#[budget_write_bytes_lt]` fires a deliberate regression when
 /// the limit is impossibly low (1 byte).
 #[test]
-#[should_panic(
-    expected = "local estimate, real network cost may differ significantly in either direction"
-)]
+#[should_panic(expected = "Write bytes cost (memory proxy)")]
 #[budget_write_bytes_lt(1)]
 fn test_negative_control_write_bytes_deliberate_regression() {
     let env = Env::default();
@@ -1154,8 +1152,16 @@ fn test_wasm_baseline_is_cached() {
 #[test]
 fn test_baseline_helpers_match_tuple() {
     let (cpu, mem) = wasm_baseline();
-    assert_eq!(baseline_cpu(), cpu, "baseline_cpu() must equal wasm_baseline().0");
-    assert_eq!(baseline_mem(), mem, "baseline_mem() must equal wasm_baseline().1");
+    assert_eq!(
+        baseline_cpu(),
+        cpu,
+        "baseline_cpu() must equal wasm_baseline().0"
+    );
+    assert_eq!(
+        baseline_mem(),
+        mem,
+        "baseline_mem() must equal wasm_baseline().1"
+    );
 }
 
 /// Verifies that a `budget.json` containing a JSON array at the requested key
