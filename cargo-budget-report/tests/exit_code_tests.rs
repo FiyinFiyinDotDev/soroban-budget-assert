@@ -28,12 +28,23 @@ fn fake_bin_dir() -> PathBuf {
     manifest_dir().join("tests/fixtures/fake_bin")
 }
 
+/// Build outputs that `cargo build` leaves in the fixture if it was ever
+/// built in place (both are in the fixture's `.gitignore`). Copying them
+/// would duplicate an entire `target/` tree into every test's tempdir, and a
+/// stale `Cargo.lock` would leak into the test run.
+const SKIPPED_ENTRIES: [&str; 2] = ["target", "Cargo.lock"];
+
+/// Recursively copies `src` into `dst`, skipping [`SKIPPED_ENTRIES`].
 fn copy_dir_all(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).expect("failed to create destination directory");
     for entry in fs::read_dir(src).expect("failed to read source directory") {
         let entry = entry.expect("failed to read directory entry");
+        let file_name = entry.file_name();
+        if SKIPPED_ENTRIES.iter().any(|skip| file_name == *skip) {
+            continue;
+        }
         let file_type = entry.file_type().expect("failed to read file type");
-        let dst_path = dst.join(entry.file_name());
+        let dst_path = dst.join(&file_name);
         if file_type.is_dir() {
             copy_dir_all(&entry.path(), &dst_path);
         } else {
@@ -153,4 +164,26 @@ fn exit_code_zero_when_check_passes() {
         EXIT_SUCCESS,
         "check with generous limits should exit 0",
     );
+}
+
+#[test]
+fn copy_dir_all_skips_build_outputs() {
+    let src = tempfile::tempdir().expect("failed to create src tempdir");
+    let dst = tempfile::tempdir().expect("failed to create dst tempdir");
+
+    fs::write(src.path().join("Cargo.toml"), "[workspace]\n").expect("write Cargo.toml");
+    fs::write(src.path().join("Cargo.lock"), "stale").expect("write Cargo.lock");
+    fs::create_dir_all(src.path().join("target/debug")).expect("create target/");
+    fs::write(src.path().join("target/debug/artifact"), "big").expect("write artifact");
+    fs::create_dir_all(src.path().join("member/src")).expect("create member/src");
+    fs::write(src.path().join("member/src/lib.rs"), "").expect("write lib.rs");
+    fs::create_dir_all(src.path().join("member/target")).expect("create member/target");
+
+    copy_dir_all(src.path(), dst.path());
+
+    assert!(dst.path().join("Cargo.toml").is_file());
+    assert!(dst.path().join("member/src/lib.rs").is_file());
+    assert!(!dst.path().join("Cargo.lock").exists());
+    assert!(!dst.path().join("target").exists());
+    assert!(!dst.path().join("member/target").exists());
 }
