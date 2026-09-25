@@ -690,8 +690,12 @@ mod tests {
             mem: u64,
         }
         impl CostMeasurer for DummyMeasurer {
-            fn cpu_instructions(&self) -> u64 { self.cpu }
-            fn memory_bytes(&self) -> u64 { self.mem }
+            fn cpu_instructions(&self) -> u64 {
+                self.cpu
+            }
+            fn memory_bytes(&self) -> u64 {
+                self.mem
+            }
         }
         impl ResourceReportable for DummyMeasurer {
             fn to_report(&self, package: &str, function: &str) -> ResourceReport {
